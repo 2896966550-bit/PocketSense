@@ -240,7 +240,8 @@ $("realBtn").onclick = async () => {
 (async function init() {
   try {
     ort.env.wasm.numThreads = 1;          // 本地服务无 COOP/COEP，单线程最稳
-    ort.env.wasm.wasmPaths = "vendor/";
+    // 相对 wasmPaths 会被 ort 再拼接脚本目录导致翻倍，必须给绝对 URL
+    ort.env.wasm.wasmPaths = new URL("vendor/", document.baseURI).href;
     session = await ort.InferenceSession.create("model_int8.onnx", { executionProviders: ["wasm"] });
     $("dot").classList.add("ok");
     $("status").textContent = "模型就绪";
