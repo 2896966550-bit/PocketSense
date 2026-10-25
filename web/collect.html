@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PocketSense · 采集</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: light-dark(#f3f5f8,#0f1114); color: light-dark(#16181c,#eef1f5); padding: 16px; }
+  .app { max-width: 420px; margin: 0 auto; }
+  .card { background: light-dark(#fff,#171a20); border: 1px solid light-dark(#e3e6eb,#2a303a);
+    border-radius: 16px; padding: 14px; margin-bottom: 12px; }
+  h1 { font-size: 16px; margin: 0 0 2px; }
+  .sub { font-size: 12px; opacity: .7; }
+  label { font-size: 12px; opacity: .8; display: block; margin: 10px 0 4px; }
+  input, select { width: 100%; padding: 9px 10px; border-radius: 10px; font-size: 14px;
+    border: 1px solid light-dark(#e3e6eb,#2a303a); background: light-dark(#fff,#171a20); color: inherit; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .chip { padding: 6px 13px; border-radius: 99px; font-size: 13px; cursor: pointer;
+    border: 1px solid light-dark(#e3e6eb,#2a303a); background: light-dark(#fff,#171a20); color: inherit; }
+  .chip[aria-pressed="true"] { background: #2f7de1; border-color: #2f7de1; color: #fff; }
+  .recwrap { text-align: center; padding: 8px 0 2px; }
+  .recbtn { width: 72px; height: 72px; border-radius: 50%; border: 2px solid #d95555; cursor: pointer;
+    background: light-dark(#fff,#171a20); color: #d95555; font-size: 26px; }
+  .recbtn.rec { background: #d95555; color: #fff; }
+  #recstate { font-size: 13px; opacity: .75; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .row { display: flex; gap: 8px; }
+  button.act { flex: 1; padding: 11px; border-radius: 12px; font-size: 14px; cursor: pointer;
+    border: 1px solid light-dark(#e3e6eb,#2a303a); background: light-dark(#fff,#171a20); color: inherit; }
+  button.act.primary { background: #2f7de1; border-color: #2f7de1; color: #fff; }
+  textarea { width: 100%; height: 110px; font-size: 11px; font-family: ui-monospace, monospace;
+    border-radius: 10px; border: 1px solid light-dark(#e3e6eb,#2a303a); background: light-dark(#fff,#171a20); color: inherit; }
+  .note { font-size: 11px; opacity: .65; }
+  #err { font-size: 11px; color: #d95555; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="card">
+    <h1>PocketSense · 采集模式</h1>
+    <div class="sub">数据仅存本机 · 被试须已签署知情同意书</div>
+    <label>被试编号</label>
+    <input id="subject" value="P07">
+    <label>放置位置</label>
+    <select id="placement">
+      <option>前口袋</option><option>手持</option><option>背包</option><option>腕部</option>
+    </select>
+    <label>活动类别</label>
+    <div class="chips" id="chips">
+      <button class="chip" aria-pressed="true">walking</button>
+      <button class="chip" aria-pressed="false">running</button>
+      <button class="chip" aria-pressed="false">upstairs</button>
+      <button class="chip" aria-pressed="false">downstairs</button>
+      <button class="chip" aria-pressed="false">sitting</button>
+      <button class="chip" aria-pressed="false">standing</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="recwrap">
+      <button class="recbtn" id="rec" aria-pressed="false" aria-label="开始或停止记录">●</button>
+      <div id="recstate">就绪 · 开发模拟模式（无传感器设备可测全流程）</div>
+    </div>
+    <div class="row">
+      <button class="act primary" id="exportBtn">导出 CSV</button>
+      <button class="act" id="discardBtn">丢弃本段</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <label>CSV 预览（导出同款内容，便于校验/复制）</label>
+    <textarea id="csvbox" spellcheck="false"></textarea>
+    <div class="note">正式模式需 HTTPS（iOS）；当前页在真实设备上点录制即用 DeviceMotion。</div>
+    <div id="err"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const SIGNS = {
+  walking: { f: 1.9, amp: 1.0, noise: 0.12, gyro: 0.8 },
+  running: { f: 2.6, amp: 1.4, noise: 0.2, gyro: 1.2 },
+  upstairs: { f: 1.25, amp: 1.35, noise: 0.16, gyro: 1.4 },
+  downstairs: { f: 1.5, amp: 1.2, noise: 0.18, gyro: 1.3 },
+  sitting: { f: 0.5, amp: 0.05, noise: 0.04, gyro: 0.03 },
+  standing: { f: 0.4, amp: 0.16, noise: 0.04, gyro: 0.08 },
+};
+let activity = "walking", recording = false, rec = [], simTimer = null, simT = 0;
+let simOn = true; // 开发模拟模式开关（真实设备上可关闭）
+
+document.querySelectorAll("#chips .chip").forEach((c) => c.addEventListener("click", () => {
+  document.querySelectorAll("#chips .chip").forEach((o) => o.setAttribute("aria-pressed", "false"));
+  c.setAttribute("aria-pressed", "true");
+  activity = c.textContent.trim();
+}));
+
+function sample() {
+  const s = SIGNS[activity], v = new Array(6);
+  for (let k = 0; k < 3; k++)
+    v[k] = s.amp * [1.0, 0.75, 0.55][k] * Math.sin(2 * Math.PI * s.f * simT + k * 1.1) + (Math.random() * 2 - 1) * s.noise;
+  for (let k = 0; k < 3; k++)
+    v[3 + k] = 0.2 * s.gyro * Math.sin(2 * Math.PI * s.f * simT + k) + (Math.random() * 2 - 1) * s.noise * 0.5;
+  rec.push({ t: Math.round(simT * 1000), v });
+  simT += 0.02;
+}
+
+async function startRec() {
+  rec = []; simT = 0;
+  if (simOn) {
+    simTimer = setInterval(sample, 20);
+  } else {
+    try {
+      if (typeof DeviceMotionEvent !== "undefined" && DeviceMotionEvent.requestPermission)
+        await DeviceMotionEvent.requestPermission();
+      window.addEventListener("devicemotion", (e) => {
+        const a = e.acceleration || e.accelerationIncludingGravity, g = e.rotationRate || {};
+        if (!a || a.x == null) return;
+        const k = (Math.abs(a.x) + Math.abs(a.y) + Math.abs(a.z)) > 5 ? 1 / 9.81 : 1;
+        rec.push({ t: Math.round(performance.now() - t0), v: [a.x * k, a.y * k, a.z * k,
+          (g.alpha || 0) / 57.3, (g.beta || 0) / 57.3, (g.gamma || 0) / 57.3] });
+      });
+      var t0 = performance.now();
+    } catch (err) { $("err").textContent = "传感器失败: " + err.message; return; }
+  }
+  recording = true;
+  $("rec").classList.add("rec"); $("rec").setAttribute("aria-pressed", "true");
+  const timer = setInterval(() => {
+    if (!recording) { clearInterval(timer); return; }
+    const sec = rec.length ? Math.round(rec[rec.length - 1].t / 1000) : 0;
+    $("recstate").textContent = "记录中 " + String(Math.floor(sec / 60)).padStart(2, "0") + ":" +
+      String(sec % 60).padStart(2, "0") + " · " + rec.length + " 采样点" + (simOn ? "（模拟）" : "");
+  }, 500);
+}
+function stopRec() {
+  recording = false;
+  if (simTimer) clearInterval(simTimer);
+  $("rec").classList.remove("rec"); $("rec").setAttribute("aria-pressed", "false");
+  $("recstate").textContent = "已停止 · 共 " + rec.length + " 采样点";
+}
+$("rec").onclick = () => (recording ? stopRec() : startRec());
+
+function buildCSV() {
+  const subj = $("subject").value.trim() || "unknown";
+  const place = $("placement").value;
+  let csv = "#subject=" + subj + "\n#activity=" + activity + "\n#placement=" + place +
+    "\n#source=collector\n#rate=50\n";
+  csv += "t_ms,ax,ay,az,gx,gy,gz\n";
+  for (const s of rec)
+    csv += s.t + "," + s.v.map((x) => x.toFixed(4)).join(",") + "\n";
+  return csv;
+}
+$("exportBtn").onclick = () => {
+  if (rec.length < 50) { $("err").textContent = "采样点不足（<50），先录制一段"; return; }
+  $("err").textContent = "";
+  const csv = buildCSV();
+  $("csvbox").value = csv.split("\n").slice(0, 30).join("\n") + "\n…（共 " + rec.length + " 行）";
+  const name = "collect_" + subjNow() + "_" + activity + "_" + Date.now() + ".csv";
+  const blob = new Blob([csv], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  window.__lastCSV = csv; window.__lastName = name; // 供自动化校验
+};
+function subjNow() { return $("subject").value.trim() || "unknown"; }
+$("discardBtn").onclick = () => { rec = []; $("csvbox").value = ""; $("recstate").textContent = "已丢弃 · 就绪"; };
+</script>
+</body>
+</html>
