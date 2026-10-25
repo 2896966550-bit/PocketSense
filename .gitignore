@@ -9,3 +9,4 @@ models/
 reports/
 web/model_*.onnx
 *.zip
+!web/model_int8.onnx
