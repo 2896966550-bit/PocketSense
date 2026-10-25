@@ -7,6 +7,7 @@ TASKS = {
     "test": [sys.executable, "-m", "pytest", "tests", "-q"],
     "smoke": [sys.executable, "-m", "psense.pipeline.smoke"],
     "data-fetch": [sys.executable, "-m", "psense.data.fetch"],
+    "data-build": [sys.executable, "-m", "psense.pipeline.build_real"],
 }
 
 
