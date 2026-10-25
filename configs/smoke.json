@@ -1,0 +1,6 @@
+{
+  "synthetic": { "seed": 7, "n_subjects": 8, "windows_per_class": 40 },
+  "split": { "test_frac": 0.25, "seed": 0 },
+  "cnn": { "epochs": 8, "batch": 64 },
+  "rf": { "n_estimators": 200 }
+}

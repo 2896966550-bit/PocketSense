@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PocketSense · 端侧推理</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: light-dark(#f3f5f8, #0f1114); color: light-dark(#16181c, #eef1f5);
+    display: flex; justify-content: center; padding: 16px;
+  }
+  .app { width: 100%; max-width: 420px; }
+  .card {
+    background: light-dark(#fff, #171a20); border: 1px solid light-dark(#e3e6eb, #2a303a);
+    border-radius: 16px; padding: 14px; margin-bottom: 12px;
+  }
+  .head { display: flex; align-items: center; gap: 10px; }
+  .logo { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg,#2f7de1,#6aa4ee); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 500; }
+  .sub { font-size: 12px; opacity: .7; }
+  .status { margin-left: auto; font-size: 12px; opacity: .8; display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #d95555; }
+  .dot.ok { background: #2e9e5b; }
+  .main { text-align: center; padding: 6px 0 10px; }
+  .cap { font-size: 12px; opacity: .65; letter-spacing: .12em; }
+  #label { font-size: 42px; font-weight: 500; line-height: 1.2; }
+  #conf { font-size: 14px; opacity: .75; font-variant-numeric: tabular-nums; }
+  .bar { display: flex; align-items: center; gap: 8px; font-size: 12px; opacity: .9; margin: 6px 0; }
+  .bar .n { width: 56px; }
+  .bar .t { flex: 1; height: 6px; border-radius: 99px; background: light-dark(#eef1f5,#1e232b); overflow: hidden; }
+  .bar .f { height: 100%; width: 0%; border-radius: 99px; transition: width .5s ease; }
+  .bar .v { width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
+  canvas { width: 100%; height: 90px; display: block; }
+  .ctl { display: flex; gap: 8px; margin-top: 4px; }
+  button {
+    flex: 1; padding: 12px; border-radius: 12px; border: 1px solid light-dark(#e3e6eb,#2a303a);
+    background: light-dark(#fff,#171a20); color: inherit; font-size: 14px; font-family: inherit; cursor: pointer;
+  }
+  button.primary { background: #2f7de1; border-color: #2f7de1; color: #fff; }
+  .meta { font-size: 12px; opacity: .7; text-align: center; font-variant-numeric: tabular-nums; }
+  #errlog { font-size: 11px; opacity: .8; white-space: pre-wrap; max-height: 90px; overflow: auto; display: none; color: #d95555; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="card">
+    <div class="head">
+      <div class="logo">PS</div>
+      <div><b>PocketSense</b><div class="sub">端侧识别 · 数据不出手机</div></div>
+      <div class="status"><span class="dot" id="dot"></span><span id="status">模型加载中…</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="main">
+      <div class="cap">当前动作</div>
+      <div id="label" aria-live="polite">—</div>
+      <div id="conf">等待推理</div>
+    </div>
+    <div id="bars"></div>
+  </div>
+
+  <div class="card">
+    <canvas id="wave" width="360" height="90"></canvas>
+    <div class="ctl">
+      <button class="primary" id="simBtn">模拟数据：播放</button>
+      <button id="realBtn">真实传感器</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="meta" id="meta">—</div>
+    <div id="errlog"></div>
+  </div>
+</div>
+
+<script src="vendor/ort.min.js"></script>
+<script>
+"use strict";
+const CLASSES = ["walking", "upstairs", "downstairs", "sitting", "standing"];
+const CN = { walking: "步行", upstairs: "上楼", downstairs: "下楼", sitting: "静坐", standing: "站立" };
+const COLORS = ["#2e9e5b", "#e8892b", "#d95555", "#7a5af8", "#2f7de1"];
+// 与 psense/data/synthetic.py 的 SIGNS 保持一致
+const SIGNS = [
+  { f: 1.90, amp: 1.00, noise: 0.12, gyro: 0.8 },  // walking
+  { f: 1.25, amp: 1.35, noise: 0.16, gyro: 1.4 },  // upstairs
+  { f: 1.50, amp: 1.20, noise: 0.18, gyro: 1.3 },  // downstairs
+  { f: 0.50, amp: 0.05, noise: 0.04, gyro: 0.03 }, // sitting
+  { f: 0.40, amp: 0.16, noise: 0.04, gyro: 0.08 }, // standing
+];
+const RATE = 50, WIN = 100;
+
+const $ = (id) => document.getElementById(id);
+const errlog = $("errlog");
+function logErr(msg) { errlog.style.display = "block"; errlog.textContent += msg + "\n"; }
+window.addEventListener("error", (e) => logErr("ERROR: " + e.message));
+window.addEventListener("unhandledrejection", (e) => logErr("REJECT: " + e.reason));
+
+// 置信度条
+const bars = {};
+CLASSES.forEach((c, i) => {
+  const row = document.createElement("div");
+  row.className = "bar";
+  row.innerHTML = '<span class="n">' + CN[c] + '</span><div class="t"><div class="f" style="background:' + COLORS[i] + '"></div></div><span class="v">0%</span>';
+  $("bars").appendChild(row);
+  bars[c] = { fill: row.querySelector(".f"), val: row.querySelector(".v") };
+});
+
+// 采样缓冲：最近 2s 的 6 通道
+let buf = [];          // [{t(ms), v:[6]}]
+let simTimer = null, inferTimer = null, listening = false;
+let simIdx = 0, simT = 0, session = null;
+
+function pushSample(tMs, v6) {
+  buf.push({ t: tMs, v: v6 });
+  while (buf.length && buf[0].t < tMs - 2200) buf.shift();
+}
+
+function simSample() {
+  const s = SIGNS[simIdx];
+  const v = new Array(6);
+  for (let k = 0; k < 3; k++) {
+    const gain = [1.0, 0.75, 0.55][k];
+    v[k] = s.amp * gain * Math.sin(2 * Math.PI * s.f * simT + k * 1.1) + (Math.random() * 2 - 1) * s.noise;
+  }
+  for (let k = 0; k < 3; k++) {
+    v[3 + k] = 0.2 * s.gyro * Math.sin(2 * Math.PI * s.f * simT + k) + (Math.random() * 2 - 1) * s.noise * 0.5;
+  }
+  pushSample(simT, v);
+  simT += 1000 / RATE;
+}
+
+// 时间戳插值到均匀 50Hz 窗口 (100,6)，转 [1,6,100]
+function buildTensor() {
+  if (buf.length < 20) return null;
+  const t0 = buf[buf.length - 1].t - (WIN - 1) * (1000 / RATE);
+  const x = new Float32Array(6 * WIN);
+  for (let i = 0; i < WIN; i++) {
+    const t = t0 + i * (1000 / RATE);
+    let j = 0;
+    while (j < buf.length - 1 && buf[j + 1].t < t) j++;
+    const a = buf[j], b = buf[Math.min(j + 1, buf.length - 1)];
+    const w = (b.t === a.t) ? 0 : (t - a.t) / (b.t - a.t);
+    for (let k = 0; k < 6; k++) x[k * WIN + i] = a.v[k] + (b.v[k] - a.v[k]) * w;
+  }
+  return new ort.Tensor("float32", x, [1, 6, WIN]);
+}
+
+function softmax(ls) {
+  const m = Math.max(...ls);
+  const ex = ls.map((v) => Math.exp(v - m));
+  const s = ex.reduce((a, b) => a + b, 0);
+  return ex.map((v) => v / s);
+}
+
+async function inferOnce() {
+  const tensor = buildTensor();
+  if (!tensor || !session) return;
+  const t0 = performance.now();
+  const out = await session.run({ x: tensor });
+  const ms = performance.now() - t0;
+  const probs = softmax(Array.from(out.logits.data));
+  let best = 0;
+  probs.forEach((p, i) => { if (p > probs[best]) best = i; });
+  $("label").textContent = CN[CLASSES[best]];
+  $("conf").textContent = "置信度 " + Math.round(probs[best] * 100) + "%";
+  CLASSES.forEach((c, i) => {
+    bars[c].fill.style.width = Math.round(probs[i] * 100) + "%";
+    bars[c].val.textContent = Math.round(probs[i] * 100) + "%";
+  });
+  $("meta").textContent = "INT8 · 单次推理 " + ms.toFixed(1) + " ms · WASM 后端";
+  drawWave();
+}
+
+const ctx = $("wave").getContext("2d");
+function drawWave() {
+  const W = 360, H = 90;
+  ctx.clearRect(0, 0, W, H);
+  ctx.strokeStyle = "rgba(128,128,128,.3)";
+  ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
+  const cols = ["#2f7de1", "#2e9e5b", "#e8892b"];
+  const data = buf.slice(-WIN);
+  for (let k = 0; k < 3; k++) {
+    ctx.strokeStyle = cols[k]; ctx.lineWidth = 1.5; ctx.beginPath();
+    data.forEach((s, i) => {
+      const y = H / 2 - Math.max(-1.5, Math.min(1.5, s.v[k])) * (H / 2 - 6) / 1.5;
+      i === 0 ? ctx.moveTo(i / (data.length - 1) * W, y) : ctx.lineTo(i / (data.length - 1) * W, y);
+    });
+    ctx.stroke();
+  }
+}
+
+async function startSim() {
+  $("simBtn").textContent = "模拟数据：停止";
+  simTimer = setInterval(() => { simSample(); if (buf.length % 10 === 0) drawWave(); }, 1000 / RATE);
+  inferTimer = setInterval(async () => {
+    simIdx = (simIdx + 1) % SIGNS.length;   // 每 2.8s 切换动作
+    await inferOnce();
+  }, 2800);
+  simIdx = 0; simT = 0;
+  for (let i = 0; i < WIN; i++) simSample();  // 预填充一个窗口
+  await inferOnce();
+}
+function stopSim() {
+  $("simBtn").textContent = "模拟数据：播放";
+  if (simTimer) clearInterval(simTimer);
+  if (inferTimer) clearInterval(inferTimer);
+  simTimer = inferTimer = null;
+}
+$("simBtn").onclick = () => (simTimer ? stopSim() : startSim());
+
+$("realBtn").onclick = async () => {
+  if (listening) return;
+  try {
+    if (typeof DeviceMotionEvent !== "undefined" && DeviceMotionEvent.requestPermission) {
+      await DeviceMotionEvent.requestPermission();
+    }
+    window.addEventListener("devicemotion", (e) => {
+      const a = e.acceleration || e.accelerationIncludingGravity;
+      const g = e.rotationRate || {};
+      if (!a || a.x == null) return;
+      // iOS 单位为 g，安卓 Chrome 为 m/s²：幅值启发式归一到 g
+      const k = (Math.abs(a.x) + Math.abs(a.y) + Math.abs(a.z)) > 5 ? 1 / 9.81 : 1;
+      pushSample(performance.now(), [
+        a.x * k, a.y * k, a.z * k,
+        (g.alpha || 0) / 57.3, (g.beta || 0) / 57.3, (g.gamma || 0) / 57.3,
+      ]);
+      if (buf.length % 10 === 0) drawWave();
+    });
+    listening = true;
+    $("realBtn").textContent = "传感器监听中…";
+    setInterval(inferOnce, 1000);
+  } catch (err) {
+    logErr("传感器失败: " + err.message + "（iOS 需 HTTPS）");
+  }
+};
+
+(async function init() {
+  try {
+    ort.env.wasm.numThreads = 1;          // 本地服务无 COOP/COEP，单线程最稳
+    ort.env.wasm.wasmPaths = "vendor/";
+    session = await ort.InferenceSession.create("model_int8.onnx", { executionProviders: ["wasm"] });
+    $("dot").classList.add("ok");
+    $("status").textContent = "模型就绪";
+    $("meta").textContent = "模型已加载，点「模拟数据」开始";
+  } catch (err) {
+    $("status").textContent = "模型加载失败";
+    logErr("加载失败: " + err.message);
+  }
+})();
+</script>
+</body>
+</html>
